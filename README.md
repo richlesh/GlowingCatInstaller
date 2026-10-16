@@ -135,6 +135,24 @@ GitHub Release on `v*` tags):
 | macOS | `.dmg` | x64, arm64 | `packaging/macos-bundle.sh` + `hdiutil` |
 | Windows | `Setup.exe` | x64, arm64 | Inno Setup (`packaging/installer.iss`) |
 
+### Code signing (optional, secret-gated)
+
+The workflow signs the macOS and Windows artifacts when the relevant repository
+secrets are configured, and produces **unsigned** builds (with a Gatekeeper /
+SmartScreen warning) when they are not — so forks and local builds still work.
+
+- **macOS** — a Developer ID Application certificate (`APPLE_CERTIFICATE_BASE64`
+  / `APPLE_CERTIFICATE_PASSWORD`) is imported into a temporary keychain; the
+  `.app` is signed with hardened runtime + secure timestamp +
+  `packaging/entitlements.plist`, and the `.dmg` is signed, submitted to Apple
+  for notarization (`notarytool`, via `APPLE_API_KEY` / `APPLE_API_KEY_ID` /
+  `APPLE_API_ISSUER`), and stapled.
+- **Windows** — the `Setup.exe` is signed with **Azure Trusted Signing**
+  (`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` +
+  `AZURE_SIGNING_ENDPOINT` / `AZURE_SIGNING_ACCOUNT_NAME` /
+  `AZURE_SIGNING_CERTIFICATE_PROFILE_NAME`).
+- **Linux** — `.deb`/`.rpm` are not code-signed (not the platform convention here).
+
 Trigger it by pushing a tag:
 
 ```sh

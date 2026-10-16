@@ -11,6 +11,8 @@ on:
 
 permissions:
   contents: write
+  # Required by azure/login (OIDC federated credentials) for Windows signing.
+  id-token: write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -85,6 +87,11 @@ jobs:
   macos:
     name: macOS (${{ matrix.arch }})
     runs-on: macos-14
+    # Expose the macOS signing secret as env so the step `if:` conditions can
+    # detect whether signing is configured. When it is unset, the import /
+    # notarize steps are skipped and an unsigned .dmg is produced.
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
     strategy:
       fail-fast: false
       matrix:
@@ -105,10 +112,81 @@ jobs:
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}
 
+      # Import the Developer ID Application certificate into a temporary
+      # keychain so the bundle step can codesign the .app and .dmg. Skipped
+      # automatically when the signing secret isn't configured (unsigned build).
+      - name: Import Developer ID certificate (macOS)
+        if: env.APPLE_CERTIFICATE_BASE64 != ''
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=build-keychain-password
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode -o $RUNNER_TEMP/cert.p12
+          security import $RUNNER_TEMP/cert.p12 -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      # Build the .app + .dmg. When the keychain holds a Developer ID identity,
+      # the bundle script codesigns the app with hardened runtime + timestamp +
+      # entitlements; otherwise it produces an unsigned bundle.
       - name: Bundle .app and .dmg
+        env:
+          GCI_SIGN_IDENTITY_NAME: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          GCI_KEYCHAIN: ${{ runner.temp }}/build.keychain
         run: |
           chmod +x packaging/macos-bundle.sh
           packaging/macos-bundle.sh ${{ matrix.target }} ${{ matrix.arch }}
+
+      # Sign the DMG itself, submit it for notarization, and staple the ticket
+      # so the download runs on Gatekeeper without a network check. Skipped when
+      # the signing secret isn't configured (unsigned build).
+      - name: Sign DMG + notarize + staple (macOS)
+        if: env.APPLE_CERTIFICATE_BASE64 != ''
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          # Accept either a bare name or a full "Developer ID Application: ..."
+          # value in the secret; normalise to the full identity string.
+          NAME="${APPLE_SIGNING_IDENTITY#Developer ID Application: }"
+          IDENTITY="Developer ID Application: ${NAME}"
+          DMG="dist/GlowingCatInstaller-${{ matrix.arch }}.dmg"
+
+          # Sign the disk image itself.
+          codesign --force --timestamp --sign "$IDENTITY" \
+            --keychain "$KEYCHAIN_PATH" "$DMG"
+
+          # Notarize using an App Store Connect API key.
+          KEY_FILE=$RUNNER_TEMP/AuthKey.p8
+          echo "$APPLE_API_KEY" > "$KEY_FILE"
+          xcrun notarytool submit "$DMG" \
+            --key "$KEY_FILE" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait | tee notarize_output.txt
+
+          # Surface the log and fail the job if notarization was rejected.
+          if grep -q "Invalid\|Rejected" notarize_output.txt; then
+            SUBMISSION_ID=$(grep -m1 "id:" notarize_output.txt | awk '{print $2}')
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key "$KEY_FILE" --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" || true
+            exit 1
+          fi
+
+          # Staple the ticket into the DMG.
+          xcrun stapler staple "$DMG"
+          rm -f "$KEY_FILE"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -124,6 +202,11 @@ jobs:
   windows:
     name: Windows (${{ matrix.arch }})
     runs-on: windows-latest
+    # Expose the Azure signing identity as env so the step `if:` conditions can
+    # detect whether Trusted Signing is configured. When unset, the login /
+    # sign steps are skipped and an unsigned Setup.exe is produced.
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -166,6 +249,30 @@ jobs:
             "/DArchLabel=${{ matrix.arch }}" `
             "/DArch=${{ matrix.arch }}" `
             packaging\installer.iss
+
+      # Sign the finished installer with Azure Trusted Signing. Skipped when
+      # Azure isn't configured (unsigned build).
+      - name: Azure login (Windows)
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign installer (Windows)
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files-folder: out
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

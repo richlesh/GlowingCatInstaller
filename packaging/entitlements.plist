@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened-runtime entitlements for the Glowing Cat Software Installer.
+         It is a native Rust/Slint app: no JIT, no unsigned third-party
+         plugins, no JVM-style relaxations, so the runtime stays locked down. -->
+
+    <!-- Allow outbound network connections (GitHub release lookups/downloads). -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Allow reading/writing files the user selects (Downloads, installers). -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>
