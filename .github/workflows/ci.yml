@@ -6,9 +6,27 @@ on:
   pull_request: {}
   workflow_dispatch: {}
 
+# Debounce: a newer run on the same ref cancels an in-progress one (including
+# while it is still in the 10-minute quiet delay), so only the latest commit is
+# built.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Quiet period: wait 10 minutes before building/testing. This debounces
+  # rapid consecutive pushes (combined with the concurrency group below, a newer
+  # push cancels an in-progress delay so only the latest commit is built).
+  delay:
+    name: Quiet delay (10m)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Wait 10 minutes
+        run: sleep 600
+
   build-test:
     name: Build & Test (${{ matrix.os }})
+    needs: delay
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
