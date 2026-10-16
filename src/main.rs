@@ -481,7 +481,7 @@ fn refresh_all(
             //    from the catalog's expected name.
             let recorded_path = {
                 let st = app.lock().unwrap();
-                install::installed_path(&st.install_state, &project_for_detect.repo)
+                install::installed_path(&st.install_state, project_for_detect.repo)
                     .map(|s| s.to_string())
             };
             let native_version = detect::detect_installed_version(

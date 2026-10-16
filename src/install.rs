@@ -38,6 +38,7 @@ pub struct InstalledEntry {
     /// - macOS: the absolute path to the copied `<App>.app` bundle.
     /// - Linux: the dpkg/rpm package name that was installed.
     /// - Windows: empty (uninstall uses the registry UninstallString).
+    ///
     /// Empty when the install used the download-then-open fallback (nothing to
     /// automatically reverse).
     #[serde(default)]
