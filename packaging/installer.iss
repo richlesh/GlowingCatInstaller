@@ -29,6 +29,16 @@
   #define Arch "x64"
 #endif
 
+; Inno resolves SetupIconFile (and other relative paths) against the directory
+; containing THIS script (packaging\), not the ISCC working directory. The CI
+; passes repo-root-relative values for SourceExe / IconsDir, so anchor them at
+; the repo root (one level up from this script) to make resolution independent
+; of the invocation directory. Absolute values passed on the command line are
+; left unchanged.
+#define RepoRoot AddBackslash(ExtractFilePath(SourcePath)) + "..\"
+#define ResolvedSourceExe (Pos(":", SourceExe) > 0 ? SourceExe : RepoRoot + SourceExe)
+#define ResolvedIconsDir (Pos(":", IconsDir) > 0 ? IconsDir : RepoRoot + IconsDir)
+
 [Setup]
 AppId={{A1B2C3D4-5E6F-4A7B-8C9D-0E1F2A3B4C5D}
 AppName=Glowing Cat Software Installer
@@ -40,7 +50,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayName=Glowing Cat Software Installer
 OutputDir=out
 OutputBaseFilename=GlowingCatInstaller-{#ArchLabel}-Setup
-SetupIconFile={#IconsDir}\app_icon.ico
+SetupIconFile={#ResolvedIconsDir}\app_icon.ico
 UninstallDisplayIcon={app}\glowing-cat-installer.exe
 Compression=lzma2
 SolidCompression=yes
@@ -62,9 +72,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "glowing-cat-installer.exe"; Flags: ignoreversion
+Source: "{#ResolvedSourceExe}"; DestDir: "{app}"; DestName: "glowing-cat-installer.exe"; Flags: ignoreversion
 ; Bundle the project icons next to the exe (loaded from resources\icons at runtime).
-Source: "{#IconsDir}\*"; DestDir: "{app}\resources\icons"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "{#ResolvedIconsDir}\*"; DestDir: "{app}\resources\icons"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Glowing Cat Software Installer"; Filename: "{app}\glowing-cat-installer.exe"
