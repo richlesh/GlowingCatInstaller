@@ -48,7 +48,9 @@ DefaultDirName={autopf}\Glowing Cat Software Installer
 DefaultGroupName=Glowing Cat Software Installer
 DisableProgramGroupPage=yes
 UninstallDisplayName=Glowing Cat Software Installer
-OutputDir=out
+; OutputDir is also resolved relative to this script's directory, so anchor it
+; at the repo root to match the `out\` the CI creates, signs, and uploads from.
+OutputDir={#RepoRoot}out
 OutputBaseFilename=GlowingCatInstaller-{#ArchLabel}-Setup
 SetupIconFile={#ResolvedIconsDir}\app_icon.ico
 UninstallDisplayIcon={app}\glowing-cat-installer.exe
