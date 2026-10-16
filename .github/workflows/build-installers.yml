@@ -247,15 +247,30 @@ jobs:
       - name: Build Setup .exe (Inno Setup)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $ErrorActionPreference = "Stop"
+          $out = Join-Path $env:GITHUB_WORKSPACE "out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          # Pass absolute paths so Inno's resolution never depends on the
+          # script dir vs. the working dir.
           & "$iscc" `
             "/DAppVersion=${{ steps.ver.outputs.version }}" `
-            "/DSourceExe=target\${{ matrix.target }}\release\glowing-cat-installer.exe" `
-            "/DIconsDir=resources\icons" `
+            "/DSourceExe=$env:GITHUB_WORKSPACE\target\${{ matrix.target }}\release\glowing-cat-installer.exe" `
+            "/DIconsDir=$env:GITHUB_WORKSPACE\resources\icons" `
+            "/DOutputDir=$out" `
             "/DArchLabel=${{ matrix.arch }}" `
             "/DArch=${{ matrix.arch }}" `
-            packaging\installer.iss
+            "$env:GITHUB_WORKSPACE\packaging\installer.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "ISCC failed with exit code $LASTEXITCODE"
+          }
+          # Fail loudly here (not later in the signer) if no installer was made.
+          Write-Host "Contents of $out:"
+          Get-ChildItem $out -Recurse | ForEach-Object { Write-Host "  $($_.FullName)" }
+          $exe = Get-ChildItem $out -Filter *.exe -ErrorAction SilentlyContinue
+          if (-not $exe) {
+            throw "No Setup .exe was produced in $out"
+          }
 
       # Sign the finished installer with Azure Trusted Signing. Skipped when
       # Azure isn't configured (unsigned build).

@@ -28,6 +28,9 @@
 #ifndef Arch
   #define Arch "x64"
 #endif
+#ifndef OutputDir
+  #define OutputDir "..\out"
+#endif
 
 ; Inno resolves SetupIconFile (and other relative paths) against the directory
 ; containing THIS script (packaging\), not the ISCC working directory. The CI
@@ -38,6 +41,7 @@
 #define RepoRoot AddBackslash(ExtractFilePath(SourcePath)) + "..\"
 #define ResolvedSourceExe (Pos(":", SourceExe) > 0 ? SourceExe : RepoRoot + SourceExe)
 #define ResolvedIconsDir (Pos(":", IconsDir) > 0 ? IconsDir : RepoRoot + IconsDir)
+#define ResolvedOutputDir (Pos(":", OutputDir) > 0 ? OutputDir : RepoRoot + OutputDir)
 
 [Setup]
 AppId={{A1B2C3D4-5E6F-4A7B-8C9D-0E1F2A3B4C5D}
@@ -48,9 +52,10 @@ DefaultDirName={autopf}\Glowing Cat Software Installer
 DefaultGroupName=Glowing Cat Software Installer
 DisableProgramGroupPage=yes
 UninstallDisplayName=Glowing Cat Software Installer
-; OutputDir is also resolved relative to this script's directory, so anchor it
-; at the repo root to match the `out\` the CI creates, signs, and uploads from.
-OutputDir={#RepoRoot}out
+; OutputDir can be overridden with /DOutputDir=<abs path>; otherwise it is
+; anchored at the repo root (matching the `out\` the CI signs/uploads from)
+; rather than resolved relative to this script's directory.
+OutputDir={#ResolvedOutputDir}
 OutputBaseFilename=GlowingCatInstaller-{#ArchLabel}-Setup
 SetupIconFile={#ResolvedIconsDir}\app_icon.ico
 UninstallDisplayIcon={app}\glowing-cat-installer.exe
