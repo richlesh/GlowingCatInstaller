@@ -265,7 +265,7 @@ jobs:
             throw "ISCC failed with exit code $LASTEXITCODE"
           }
           # Fail loudly here (not later in the signer) if no installer was made.
-          Write-Host "Contents of $out:"
+          Write-Host "Contents of ${out}:"
           Get-ChildItem $out -Recurse | ForEach-Object { Write-Host "  $($_.FullName)" }
           $exe = Get-ChildItem $out -Filter *.exe -ErrorAction SilentlyContinue
           if (-not $exe) {
