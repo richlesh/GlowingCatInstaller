@@ -1,0 +1,78 @@
+[package]
+name = "glowing-cat-installer"
+version = "0.1.0"
+edition = "2021"
+description = "Download and install Glowing Cat Projects from github.com/richlesh"
+license = "MIT"
+repository = "https://github.com/richlesh/GlowingCatInstaller"
+default-run = "glowing-cat-installer"
+
+[[bin]]
+name = "glowing-cat-installer"
+path = "src/main.rs"
+
+[dependencies]
+slint = "1.18.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+directories = "6.0.0"
+semver = "1.0.28"
+
+[build-dependencies]
+slint-build = "1.18.1"
+
+# macOS-only: build the native menu bar with muda so our "About" lands in the
+# real Application menu (Slint's declarative MenuBar can't inject into it and
+# would add a second app-named menu). `muda` is pinned to the version Slint's
+# winit backend uses, so there is a single muda in the tree sharing its global
+# MenuEvent channel. `i-slint-backend-winit` lets us disable Slint's default
+# NSApp menu bar (otherwise it installs its own menu and hijacks muda's events).
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "=0.19.3"
+i-slint-backend-winit = "=1.18.1"
+
+# Windows-only: embed the application icon into the .exe at build time.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# ---------------------------------------------------------------------------
+# Packaging metadata
+# ---------------------------------------------------------------------------
+
+# `cargo deb` (cargo-deb) uses this section to build the .deb.
+[package.metadata.deb]
+maintainer = "Richard Lesh <noreply@lesh.cloud>"
+copyright = "2026, Richard Lesh"
+license-file = ["LICENSE", "0"]
+extended-description = "A graphical installer for the Glowing Cat Projects. Browse projects published under github.com/richlesh and download/install them for your platform."
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/glowing-cat-installer", "usr/bin/glowing-cat-installer", "755"],
+    ["resources/icons/*.png", "usr/share/glowing-cat-installer/icons/", "644"],
+    ["packaging/glowing-cat-installer.desktop", "usr/share/applications/", "644"],
+    ["README.md", "usr/share/doc/glowing-cat-installer/README", "644"],
+]
+# Depend on the shared libs Slint links against at runtime.
+depends = "libc6, libfontconfig1, libfreetype6, libxcb1, libxkbcommon0"
+
+# `cargo generate-rpm` (cargo-generate-rpm) uses this section to build the .rpm.
+[package.metadata.generate-rpm]
+summary = "Graphical installer for the Glowing Cat Projects"
+license = "MIT"
+assets = [
+    { source = "target/release/glowing-cat-installer", dest = "/usr/bin/glowing-cat-installer", mode = "755" },
+    { source = "resources/icons/*.png", dest = "/usr/share/glowing-cat-installer/icons/", mode = "644" },
+    { source = "packaging/glowing-cat-installer.desktop", dest = "/usr/share/applications/glowing-cat-installer.desktop", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/glowing-cat-installer/README", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+fontconfig = "*"
+freetype = "*"

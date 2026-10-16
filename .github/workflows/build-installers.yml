@@ -1,0 +1,201 @@
+name: Build Installers
+
+# Builds the Glowing Cat Software Installer itself for every platform/architecture and
+# uploads the installer artifacts. On a tag push it also attaches them to a
+# GitHub Release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux: .deb and .rpm, for x64 and arm64, built on native-arch runners.
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux ${{ matrix.pkg }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64,   runner: ubuntu-24.04,      target: x86_64-unknown-linux-gnu,  pkg: deb }
+          - { arch: x64,   runner: ubuntu-24.04,      target: x86_64-unknown-linux-gnu,  pkg: rpm }
+          - { arch: arm64, runner: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, pkg: deb }
+          - { arch: arm64, runner: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, pkg: rpm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Slint runtime libs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libfontconfig-dev libfreetype-dev \
+            libxcb1-dev libxkbcommon-dev \
+            libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # cargo-deb / cargo-generate-rpm read [package.metadata.*] in Cargo.toml.
+      - name: Install packaging tool
+        run: |
+          if [ "${{ matrix.pkg }}" = "deb" ]; then
+            cargo install cargo-deb --locked
+          else
+            cargo install cargo-generate-rpm --locked
+          fi
+
+      - name: Package .deb
+        if: matrix.pkg == 'deb'
+        run: |
+          cargo deb --no-build --target ${{ matrix.target }} --output dist/
+          mkdir -p out && cp dist/*.deb out/
+
+      - name: Package .rpm
+        if: matrix.pkg == 'rpm'
+        run: |
+          mkdir -p out
+          cargo generate-rpm --target ${{ matrix.target }} \
+            --payload-compress none \
+            -o out/glowing-cat-installer-${{ matrix.arch }}.rpm
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.pkg }}-${{ matrix.arch }}
+          path: out/*
+
+  # ---------------------------------------------------------------------------
+  # macOS: .dmg for x64 and arm64. macos-14 is arm64; we cross-build x86_64.
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, target: aarch64-apple-darwin }
+          - { arch: x64,   target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Bundle .app and .dmg
+        run: |
+          chmod +x packaging/macos-bundle.sh
+          packaging/macos-bundle.sh ${{ matrix.target }} ${{ matrix.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.arch }}
+          path: dist/*.dmg
+
+  # ---------------------------------------------------------------------------
+  # Windows: Setup .exe for x64 and arm64, built with Inno Setup.
+  # windows-latest is x64; we add the arm64 target and cross-build the binary,
+  # then wrap each in an installer .exe.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64,   target: x86_64-pc-windows-msvc }
+          - { arch: arm64, target: aarch64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Read version from Cargo.toml
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build Setup .exe (Inno Setup)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & "$iscc" `
+            "/DAppVersion=${{ steps.ver.outputs.version }}" `
+            "/DSourceExe=target\${{ matrix.target }}\release\glowing-cat-installer.exe" `
+            "/DIconsDir=resources\icons" `
+            "/DArchLabel=${{ matrix.arch }}" `
+            "/DArch=${{ matrix.arch }}" `
+            packaging\installer.iss
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe-${{ matrix.arch }}
+          path: out/*.exe
+
+  # ---------------------------------------------------------------------------
+  # Attach everything to a GitHub Release on tag builds.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish Release
+    needs: [linux, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifact tree
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.exe' \) \
+            -exec cp {} release/ \;
+          ls -la release
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

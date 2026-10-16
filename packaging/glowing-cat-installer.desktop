@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Glowing Cat Software Installer
+Comment=Download and install the Glowing Cat Software Projects
+Exec=glowing-cat-installer
+Icon=/usr/share/glowing-cat-installer/icons/app_icon.png
+Terminal=false
+Categories=Utility;System;

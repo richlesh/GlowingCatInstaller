@@ -1,0 +1,7 @@
+/target
+/dist
+/out
+**/*.rs.bk
+*.pdb
+.DS_Store
+installed.json
