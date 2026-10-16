@@ -1,13 +1,20 @@
 name: Build Installers
 
 # Builds the Glowing Cat Software Installer itself for every platform/architecture and
-# uploads the installer artifacts. On a tag push it also attaches them to a
-# GitHub Release.
+# uploads the installer artifacts. Manual-only: run it from the Actions tab
+# (workflow_dispatch). Optionally publish a GitHub Release from the same run by
+# setting `publish_release: true` and providing a `tag`.
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Also publish a GitHub Release with the built artifacts"
+        type: boolean
+        default: false
+      tag:
+        description: "Release tag to publish (e.g. v0.1.0); required when publish_release is true"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -281,12 +288,13 @@ jobs:
           path: out/*.exe
 
   # ---------------------------------------------------------------------------
-  # Attach everything to a GitHub Release on tag builds.
+  # Optionally attach everything to a GitHub Release. Runs only when the manual
+  # dispatch requested it (publish_release: true) and a tag was supplied.
   # ---------------------------------------------------------------------------
   release:
     name: Publish Release
     needs: [linux, macos, windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ inputs.publish_release && inputs.tag != '' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
@@ -304,5 +312,6 @@ jobs:
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: release/*
           generate_release_notes: true
