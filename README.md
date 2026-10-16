@@ -175,4 +175,4 @@ or run it manually from the Actions tab (workflow_dispatch).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPLv3 — see [LICENSE](LICENSE).

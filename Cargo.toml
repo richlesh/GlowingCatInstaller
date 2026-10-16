@@ -3,7 +3,7 @@ name = "glowing-cat-installer"
 version = "0.1.0"
 edition = "2021"
 description = "Download and install Glowing Cat Projects from github.com/richlesh"
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/richlesh/GlowingCatInstaller"
 default-run = "glowing-cat-installer"
 
@@ -65,7 +65,7 @@ depends = "libc6, libfontconfig1, libfreetype6, libxcb1, libxkbcommon0"
 # `cargo generate-rpm` (cargo-generate-rpm) uses this section to build the .rpm.
 [package.metadata.generate-rpm]
 summary = "Graphical installer for the Glowing Cat Projects"
-license = "MIT"
+license = "GPL-3.0-or-later"
 assets = [
     { source = "target/release/glowing-cat-installer", dest = "/usr/bin/glowing-cat-installer", mode = "755" },
     { source = "resources/icons/*.png", dest = "/usr/share/glowing-cat-installer/icons/", mode = "644" },
