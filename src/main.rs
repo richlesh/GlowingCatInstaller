@@ -330,8 +330,10 @@ fn open_url(url: &str) {
 /// current working directory. We check, in order:
 ///   1. `<exe_dir>/resources/icons`               (binary shipped with resources)
 ///   2. `<exe_dir>/../Resources/resources/icons`  (inside a macOS .app bundle)
-///   3. `<cwd>/resources/icons`                   (e.g. `cargo run` from root)
-///   4. `<CARGO_MANIFEST_DIR>/resources/icons`    (dev-time fallback)
+///   3. `<exe_dir>/../share/glowing-cat-installer/icons` (Linux .deb/.rpm FHS)
+///   4. `/usr/share/glowing-cat-installer/icons`  (absolute FHS fallback)
+///   5. `<cwd>/resources/icons`                   (e.g. `cargo run` from root)
+///   6. `<CARGO_MANIFEST_DIR>/resources/icons`    (dev-time fallback)
 ///
 /// Returns the first that exists, or the exe-relative path as a last resort.
 fn icons_dir() -> std::path::PathBuf {
@@ -341,8 +343,16 @@ fn icons_dir() -> std::path::PathBuf {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("resources/icons"));
             candidates.push(dir.join("../Resources/resources/icons"));
+            // Linux FHS layout from the .deb/.rpm: the binary lives in
+            // <prefix>/bin and the icons in <prefix>/share/glowing-cat-installer/icons
+            // (e.g. /usr/bin + /usr/share/glowing-cat-installer/icons).
+            candidates.push(dir.join("../share/glowing-cat-installer/icons"));
         }
     }
+    // Absolute FHS location, in case the exe path can't be resolved.
+    candidates.push(std::path::PathBuf::from(
+        "/usr/share/glowing-cat-installer/icons",
+    ));
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("resources/icons"));
     }

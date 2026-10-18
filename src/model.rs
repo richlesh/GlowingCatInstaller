@@ -98,7 +98,7 @@ pub fn catalog() -> Vec<Project> {
         Project {
             name: "TagTiger",
             repo: "TagTiger",
-            description: "Audio/file tag editor.",
+            description: "MP4 file tag editor.",
             icon: "TagTiger.png",
             pkg_name: Some("tagtiger-gui"), // deb: tagtiger-gui_1.2.0-1_amd64.deb
             macos_app: None,
