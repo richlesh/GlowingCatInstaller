@@ -56,8 +56,21 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (release)
-        run: cargo build --release --target ${{ matrix.target }}
+      # Build against an older glibc floor (2.35) so the binaries run on
+      # Debian 12 (glibc 2.36), Ubuntu 22.04 (2.35) and newer — not just the
+      # 24.04 runner's glibc (2.39). cargo-zigbuild uses Zig as the linker and
+      # lets us pin the glibc version in the target triple; the output still
+      # lands in target/<triple>/release so the packaging steps are unchanged.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build (release, glibc 2.35 floor)
+        run: cargo zigbuild --release --target ${{ matrix.target }}.2.35
 
       # cargo-deb / cargo-generate-rpm read [package.metadata.*] in Cargo.toml.
       - name: Install packaging tool

@@ -59,8 +59,10 @@ assets = [
     ["packaging/glowing-cat-installer.desktop", "usr/share/applications/", "644"],
     ["README.md", "usr/share/doc/glowing-cat-installer/README", "644"],
 ]
-# Depend on the shared libs Slint links against at runtime.
-depends = "libc6, libfontconfig1, libfreetype6, libxcb1, libxkbcommon0"
+# Depend on the shared libs Slint links against at runtime. The binary is
+# built against a glibc 2.35 floor (see CI), so it runs on Debian 12 /
+# Ubuntu 22.04 and newer.
+depends = "libc6 (>= 2.35), libfontconfig1, libfreetype6, libxcb1, libxkbcommon0"
 
 # `cargo generate-rpm` (cargo-generate-rpm) uses this section to build the .rpm.
 [package.metadata.generate-rpm]

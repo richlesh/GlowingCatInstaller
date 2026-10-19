@@ -132,6 +132,10 @@ GitHub Release on `v*` tags):
 |----------|--------|---------------|---------|
 | Linux (Debian) | `.deb` | x64, arm64 | `cargo-deb` on native x64/arm64 runners |
 | Linux (RPM) | `.rpm` | x64, arm64 | `cargo-generate-rpm` |
+
+The Linux binaries are built with `cargo-zigbuild` against a **glibc 2.35**
+floor, so they run on Debian 12 (glibc 2.36), Ubuntu 22.04 (2.35), and newer —
+not just the 24.04 build runner's glibc.
 | macOS | `.dmg` | x64, arm64 | `packaging/macos-bundle.sh` + `hdiutil` |
 | Windows | `Setup.exe` | x64, arm64 | Inno Setup (`packaging/installer.iss`) |
 
