@@ -215,6 +215,10 @@ export component MainWindow inherits Window {
     // Install scope ("Install for:"): options and current selection.
     in property <[string]> scope-options;
     in property <int> scope-index;
+    // Whether the "Install for:" scope selector applies to the selected OS.
+    // False for the Linux package types (.deb/.rpm), where apt/dnf installs are
+    // always system-wide, so the selector is hidden to avoid implying a choice.
+    in property <bool> scope-applicable: true;
     in-out property <bool> dark-mode: true;
     in property <string> global-status;
     // True while Alt/Option is held; flips Upgrade cards to Remove.
@@ -349,8 +353,9 @@ export component MainWindow inherits Window {
                             font-size: 12px;
                         }
                     }
-                    // Install scope selector.
-                    VerticalLayout {
+                    // Install scope selector. Hidden for Linux package types,
+                    // where installs are always system-wide (apt/dnf).
+                    if root.scope-applicable: VerticalLayout {
                         alignment: center;
                         Text {
                             text: "Install for:";
@@ -358,7 +363,7 @@ export component MainWindow inherits Window {
                             font-size: 12px;
                         }
                     }
-                    VerticalLayout {
+                    if root.scope-applicable: VerticalLayout {
                         alignment: center;
                         ComboBox {
                             width: 130px;

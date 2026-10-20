@@ -116,6 +116,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     ui.set_scope_options(ModelRc::new(VecModel::from(scope_options)));
     ui.set_scope_index(InstallScope::ThisUser.index() as i32);
+    // The scope selector only applies where install location is user-selectable
+    // (macOS, Windows). Hide it for the Linux package types (apt/dnf installs
+    // are always system-wide).
+    ui.set_scope_applicable(scope_applies(host_pkg));
     ui.set_dark_mode(true);
     ui.set_self_installed(selfinstall::is_installed());
     ui.set_self_install_hint(SharedString::from(selfinstall::install_location_hint()));
@@ -309,6 +313,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut st = app.lock().unwrap();
                 st.pkg = PackageType::from_index(idx as usize);
             }
+            // Show/hide the scope selector for the newly selected OS.
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_scope_applicable(scope_applies(PackageType::from_index(idx as usize)));
+            }
             refresh_all(&app, &catalog, &ui_weak, &cards, false);
         });
     }
@@ -366,6 +374,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.run()?;
     Ok(())
+}
+
+/// Whether the "Install for:" scope selector applies to a package type. It does
+/// for macOS and Windows (where the install location / elevation differs by
+/// scope), but not for the Linux package types: `.deb`/`.rpm` installs go
+/// through apt/dnf and are always system-wide, so the selector is hidden.
+fn scope_applies(pkg: PackageType) -> bool {
+    !matches!(pkg, PackageType::Deb | PackageType::Rpm)
 }
 
 /// Open a URL in the user's default browser via the OS, matching the
