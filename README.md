@@ -41,6 +41,22 @@ entirely optional — the app runs fine without it.
 
 Uninstall reverses exactly these changes. See `src/selfinstall.rs`.
 
+## Keeping the app up to date (self-update)
+
+The app checks its **own** GitHub repo (`richlesh/GlowingCatInstaller`) for a
+newer release and, when one exists, shows an **"Update available → vX.Y.Z"** pill
+in the top-right. Clicking it downloads the matching installer asset for your
+OS/architecture (`.dmg` / `.deb` / `.rpm` / `Setup.exe`) and runs it through the
+same signed native-install path the catalog projects use (`src/selfupdate.rs`
+→ `install::install_file`). The running app keeps running; relaunch to pick up
+the new version.
+
+The check is folded into the normal refresh (startup + the Refresh button) and
+reuses the hourly release cache, so it costs at most one extra GitHub request
+per hour. Running the signed installer — rather than swapping the binary in
+place — avoids breaking the macOS code signature / notarization and the
+can't-overwrite-a-running-`.exe` problem on Windows.
+
 ## How installation works (v1)
 
 Pressing **Install** / **Upgrade**:
@@ -75,6 +91,7 @@ src/
   github.rs                     # release API client + asset matcher + versions
   install.rs                    # download / open / state tracking / remove
   selfinstall.rs                # optional: install/uninstall this app itself
+  selfupdate.rs                 # optional: check for + install app updates
 resources/icons/                # project icons (supply your own PNGs)
 packaging/
   glowing-cat-installer.desktop # Linux desktop entry
@@ -138,6 +155,25 @@ floor, so they run on Debian 12 (glibc 2.36), Ubuntu 22.04 (2.35), and newer —
 not just the 24.04 build runner's glibc.
 | macOS | `.dmg` | x64, arm64 | `packaging/macos-bundle.sh` + `hdiutil` |
 | Windows | `Setup.exe` | x64, arm64 | Inno Setup (`packaging/installer.iss`) |
+
+### Versioning the artifacts
+
+The **version** stamped into every artifact comes from the workflow's `tag`
+input (a leading `v` is stripped, so `v0.2.0` → `0.2.0`). Each build job patches
+that version into `Cargo.toml` at build time only — it is **not** committed back
+to the repo. If `tag` is left blank, the version already in `Cargo.toml` is used.
+
+Every artifact carries the version in its filename (for `X.Y.Z` and arch `A`):
+
+| Format | Filename |
+|--------|----------|
+| `.deb` | `glowing-cat-installer_X.Y.Z-1_<debarch>.deb` |
+| `.rpm` | `glowing-cat-installer-X.Y.Z-A.rpm` |
+| `.dmg` | `GlowingCatInstaller-X.Y.Z-A.dmg` |
+| `Setup.exe` | `GlowingCatInstaller-X.Y.Z-A-Setup.exe` |
+
+The `.deb` arch label (`amd64`/`arm64`) follows the Debian convention that
+`cargo-deb` applies; the others use the workflow's `x64`/`arm64` labels.
 
 ### Code signing (optional, secret-gated)
 

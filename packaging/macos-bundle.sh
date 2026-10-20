@@ -5,7 +5,7 @@
 #   e.g. packaging/macos-bundle.sh aarch64-apple-darwin arm64
 #        packaging/macos-bundle.sh x86_64-apple-darwin  x64
 #
-# Produces: dist/GlowingCatInstaller-<arch-label>.dmg
+# Produces: dist/GlowingCatInstaller-<version>-<arch-label>.dmg
 set -euo pipefail
 
 TARGET="${1:?target triple required}"
@@ -19,7 +19,7 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 ROOT="$(pwd)"
 BUILD_BIN="${ROOT}/target/${TARGET}/release/${BIN_NAME}"
 APP_DIR="${ROOT}/dist/${APP_NAME}.app"
-DMG_OUT="${ROOT}/dist/GlowingCatInstaller-${ARCH_LABEL}.dmg"
+DMG_OUT="${ROOT}/dist/GlowingCatInstaller-${VERSION}-${ARCH_LABEL}.dmg"
 
 rm -rf "${APP_DIR}" "${DMG_OUT}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"

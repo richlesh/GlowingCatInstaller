@@ -77,6 +77,10 @@ fn client() -> reqwest::blocking::Client {
 pub enum FetchError {
     /// The repo has no published (non-draft) release.
     NoRelease,
+    /// GitHub rejected the request because the API rate limit is exhausted
+    /// (HTTP 403/429 with `x-ratelimit-remaining: 0`, or a secondary limit).
+    /// Callers should stop issuing further requests for a while.
+    RateLimited,
     /// Network / HTTP / decode failure.
     Http(String),
 }
@@ -85,6 +89,7 @@ impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FetchError::NoRelease => write!(f, "no published release"),
+            FetchError::RateLimited => write!(f, "GitHub API rate limit reached"),
             FetchError::Http(e) => write!(f, "network error: {e}"),
         }
     }
@@ -107,6 +112,13 @@ pub fn latest_release(slug: &str) -> Result<Release, FetchError> {
         .send()
         .map_err(|e| FetchError::Http(e.to_string()))?;
 
+    // Stop early if GitHub says we're out of budget: a 429, or a 403 with the
+    // remaining-requests header at 0 (the primary-limit signal). A plain 403
+    // without that header is treated as a normal HTTP error below.
+    if is_rate_limited(&resp) {
+        return Err(FetchError::RateLimited);
+    }
+
     if resp.status().is_success() {
         return resp
             .json::<Release>()
@@ -120,6 +132,10 @@ pub fn latest_release(slug: &str) -> Result<Release, FetchError> {
         .header("Accept", "application/vnd.github+json")
         .send()
         .map_err(|e| FetchError::Http(e.to_string()))?;
+
+    if is_rate_limited(&list_resp) {
+        return Err(FetchError::RateLimited);
+    }
 
     if !list_resp.status().is_success() {
         // 404 here means no releases at all.
@@ -135,6 +151,33 @@ pub fn latest_release(slug: &str) -> Result<Release, FetchError> {
         .filter(|r| !r.draft)
         .max_by(cmp_releases)
         .ok_or(FetchError::NoRelease)
+}
+
+/// Detect a GitHub rate-limit rejection on a response.
+///
+/// GitHub signals an exhausted limit with either:
+///   - HTTP 429 (Too Many Requests), or
+///   - HTTP 403 together with `x-ratelimit-remaining: 0` (primary limit), or
+///   - HTTP 403 together with a `retry-after` header (secondary / abuse limit).
+///
+/// A 403 without any of those headers (e.g. a genuinely forbidden resource) is
+/// not treated as a rate limit.
+fn is_rate_limited(resp: &reqwest::blocking::Response) -> bool {
+    let status = resp.status().as_u16();
+    if status == 429 {
+        return true;
+    }
+    if status == 403 {
+        let headers = resp.headers();
+        let remaining_zero = headers
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim() == "0")
+            .unwrap_or(false);
+        let has_retry_after = headers.contains_key("retry-after");
+        return remaining_zero || has_retry_after;
+    }
+    false
 }
 
 /// Order two releases by parsed version, falling back to tag string order.

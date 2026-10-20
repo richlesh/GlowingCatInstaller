@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       tag:
-        description: "Release tag to publish (e.g. v0.1.0); required when publish_release is true"
+        description: "Release tag / version (e.g. v0.1.0). Stamped into Cargo.toml and all artifact filenames (build-only). Required when publish_release is true."
         type: string
         default: ""
 
@@ -38,6 +38,25 @@ jobs:
           - { arch: arm64, runner: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, pkg: rpm }
     steps:
       - uses: actions/checkout@v4
+
+      # Derive the version from the `tag` input (strip a leading "v"); fall back
+      # to the version already in Cargo.toml when no tag was supplied. Patch it
+      # into Cargo.toml build-only (not committed) so every packaging tool and
+      # artifact filename carries this version.
+      - name: Derive version and patch Cargo.toml
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          fi
+          sed -i -E "0,/^version\s*=\s*\"[^\"]+\"/s//version = \"${VERSION}\"/" Cargo.toml
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+          grep -m1 '^version' Cargo.toml
 
       - name: Install system dependencies (Slint runtime libs)
         run: |
@@ -93,7 +112,7 @@ jobs:
           mkdir -p out
           cargo generate-rpm --target ${{ matrix.target }} \
             --payload-compress none \
-            -o out/glowing-cat-installer-${{ matrix.arch }}.rpm
+            -o out/glowing-cat-installer-${{ steps.ver.outputs.version }}-${{ matrix.arch }}.rpm
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -120,6 +139,22 @@ jobs:
           - { arch: x64,   target: x86_64-apple-darwin }
     steps:
       - uses: actions/checkout@v4
+
+      # Derive version from the `tag` input (strip leading "v"); fall back to the
+      # Cargo.toml version. Patched build-only so Info.plist + .dmg filename match.
+      - name: Derive version and patch Cargo.toml
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          fi
+          perl -0pi -e "s/^version\s*=\s*\"[^\"]+\"/version = \"${VERSION}\"/m" Cargo.toml
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -180,7 +215,7 @@ jobs:
           # value in the secret; normalise to the full identity string.
           NAME="${APPLE_SIGNING_IDENTITY#Developer ID Application: }"
           IDENTITY="Developer ID Application: ${NAME}"
-          DMG="dist/GlowingCatInstaller-${{ matrix.arch }}.dmg"
+          DMG="dist/GlowingCatInstaller-${{ steps.ver.outputs.version }}-${{ matrix.arch }}.dmg"
 
           # Sign the disk image itself.
           codesign --force --timestamp --sign "$IDENTITY" \
@@ -236,6 +271,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Derive version from the `tag` input (strip leading "v"); fall back to the
+      # Cargo.toml version. Patched build-only so the embedded AppVersion and the
+      # Setup.exe filename carry this version.
+      - name: Derive version and patch Cargo.toml
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.tag }}"
+          $version = $tag -replace '^v',''
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          }
+          $content = Get-Content Cargo.toml -Raw
+          $content = [regex]::Replace($content, '(?m)^version\s*=\s*"[^"]+"', "version = `"$version`"", 1)
+          Set-Content -Path Cargo.toml -Value $content -NoNewline
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building version $version"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -249,13 +302,6 @@ jobs:
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
-
-      - name: Read version from Cargo.toml
-        id: ver
-        shell: pwsh
-        run: |
-          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Build Setup .exe (Inno Setup)
         shell: pwsh

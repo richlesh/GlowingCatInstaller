@@ -105,6 +105,15 @@ impl InstallState {
         }
     }
 
+    /// The unix time this repo's release was last checked, or `None` if it has
+    /// never been checked. Used to order refreshes oldest-first so that, under
+    /// a limited per-cycle budget, every project eventually gets checked rather
+    /// than always starving the tail of a fixed list. Never-checked repos
+    /// (`None`) are the oldest and should be ordered first by the caller.
+    pub fn last_checked_at(&self, repo: &str) -> Option<u64> {
+        self.release_cache.get(repo).map(|c| c.checked_at)
+    }
+
     /// Insert / replace the cached release for `repo`, stamped with now().
     pub fn put_cache(
         &mut self,
@@ -334,6 +343,22 @@ fn perform_install(
         PackageType::Rpm => install_linux(path, pkg_name, LinuxPm::Dnf),
         PackageType::Windows => install_windows(path, scope),
     }
+}
+
+/// Install an already-downloaded installer file using the native per-OS path,
+/// without touching the catalog install-state. This is the public seam the
+/// self-updater uses to run the app's own freshly-downloaded installer
+/// (`.dmg`/`.deb`/`.rpm`/`Setup.exe`) through the same signed flow the catalog
+/// projects use. `app_name`/`pkg_name` identify the macOS `.app` bundle and the
+/// dpkg/rpm package respectively.
+pub fn install_file(
+    path: &Path,
+    pkg: PackageType,
+    scope: InstallScope,
+    app_name: &str,
+    pkg_name: &str,
+) -> Result<InstallOutcome, InstallError> {
+    perform_install(path, pkg, scope, app_name, pkg_name)
 }
 
 /// macOS: mount the DMG, copy the first `.app` found into the Applications
@@ -730,5 +755,25 @@ mod tests {
             back.release_cache["TagTiger"].tag_name.as_deref(),
             Some("v1.2.0")
         );
+    }
+
+    #[test]
+    fn last_checked_at_orders_oldest_first() {
+        let mut s = InstallState::default();
+        s.put_cache("Newer", Some("v2.0.0".into()), Vec::new(), false);
+        s.put_cache("Older", Some("v1.0.0".into()), Vec::new(), false);
+        // Backdate "Older" so it is genuinely the oldest check.
+        if let Some(e) = s.release_cache.get_mut("Older") {
+            e.checked_at = now_secs().saturating_sub(1000);
+        }
+
+        // A never-checked repo reports None (treated as oldest by callers).
+        assert!(s.last_checked_at("NeverChecked").is_none());
+
+        // Sorting repos by last_checked_at (None = 0 = oldest) puts the
+        // never-checked one first, then the backdated one, then the fresh one.
+        let mut repos = vec!["Newer", "Older", "NeverChecked"];
+        repos.sort_by_key(|r| s.last_checked_at(r).unwrap_or(0));
+        assert_eq!(repos, vec!["NeverChecked", "Older", "Newer"]);
     }
 }

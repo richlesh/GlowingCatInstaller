@@ -10,6 +10,7 @@ mod install;
 mod model;
 mod platform;
 mod selfinstall;
+mod selfupdate;
 
 #[cfg(target_os = "macos")]
 mod menu_macos;
@@ -53,6 +54,9 @@ struct AppState {
     /// Per-project id -> state.
     projects: Vec<ProjectState>,
     install_state: install::InstallState,
+    /// The newer installer release discovered by the self-update check, if any.
+    /// Set by the check, consumed by the "Update available" button handler.
+    self_update: Option<selfupdate::SelfUpdate>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -84,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         alt_held: false,
         projects: vec![ProjectState::default(); catalog.len()],
         install_state: install::load_state(),
+        self_update: None,
     }));
 
     // Seed installed versions from persisted state.
@@ -226,6 +231,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_show_about(true);
             }
+        });
+    }
+
+    // "Update available" pressed: download the newer installer for this app and
+    // run it through the native install path. The running app keeps running;
+    // the user relaunches to pick up the new version.
+    {
+        let app = app.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_self_update_pressed(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            // Snapshot the pending update + current OS/scope.
+            let (update, pkg, scope) = {
+                let st = app.lock().unwrap();
+                (st.self_update.clone(), st.pkg, st.scope)
+            };
+            let Some(update) = update else { return };
+            ui.set_global_status(SharedString::from(format!(
+                "Downloading update {}…",
+                update.version
+            )));
+
+            let app = app.clone();
+            let ui_weak2 = ui.as_weak();
+            thread::spawn(move || {
+                let res = selfupdate::apply(&update, pkg, scope);
+                let cleared = res.is_ok();
+                let msg = match res {
+                    Ok(outcome) if outcome.automated => format!(
+                        "Updated to {} — relaunch to use the new version.",
+                        update.version
+                    ),
+                    Ok(_) => format!(
+                        "Running the {} installer — follow its prompts, then relaunch.",
+                        update.version
+                    ),
+                    Err(e) => format!("Update failed: {e}"),
+                };
+                // On success, clear the available flag so the pill disappears.
+                if cleared {
+                    if let Ok(mut st) = app.lock() {
+                        st.self_update = None;
+                    }
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        ui.set_global_status(SharedString::from(msg));
+                        if cleared {
+                            ui.set_self_update_available(false);
+                        }
+                    }
+                });
+            });
         });
     }
     {
@@ -449,7 +507,29 @@ fn apply_card(
     );
 }
 
-/// Spawn background lookups for every project.
+/// How many projects we network-check per batch. GitHub's unauthenticated REST
+/// limit is 60 requests/hour per IP (and a single check can cost two requests
+/// when the `/releases/latest` endpoint 404s and we fall back to listing), so
+/// we work in modest batches and stop entirely the moment GitHub rate-limits
+/// us. The remaining projects are picked up on the next startup / Refresh —
+/// and because we order oldest-checked-first, they go to the front next time.
+const BATCH_SIZE: usize = 10;
+
+/// Outcome of one project's version check, reported back to the batch
+/// coordinator so it can decide whether to keep going.
+enum CheckOutcome {
+    /// The check completed (served from cache, fetched, or a non-fatal network
+    /// error). Safe to continue with the next project.
+    Done,
+    /// GitHub rate-limited us. The coordinator should stop this cycle.
+    RateLimited,
+}
+
+/// Kick off release lookups. Cache-fresh projects (unless `force`) are applied
+/// immediately in parallel — they cost no network. Projects that need a network
+/// check are ordered **oldest-checked-first** and processed in batches of
+/// [`BATCH_SIZE`]; after each batch the coordinator starts the next one, and it
+/// stops early if any request comes back rate-limited.
 fn refresh_all(
     app: &Arc<Mutex<AppState>>,
     catalog: &Rc<Vec<model::Project>>,
@@ -457,202 +537,373 @@ fn refresh_all(
     cards: &Rc<VecModel<ProjectCard>>,
     force: bool,
 ) {
+    // Check for an update to the installer itself (hourly-cached, same budget).
+    spawn_self_update_check(app, ui_weak, force);
+
+    // Partition projects into "served from fresh cache" vs. "needs a network
+    // check". A forced Refresh treats every project as needing a check.
+    let mut need_network: Vec<usize> = Vec::new();
+    let mut from_cache: Vec<usize> = Vec::new();
+    {
+        let st = app.lock().unwrap();
+        for (i, project) in catalog.iter().enumerate() {
+            let fresh = !force && st.install_state.fresh_cache(project.repo).is_some();
+            if fresh {
+                from_cache.push(i);
+            } else {
+                need_network.push(i);
+            }
+        }
+    }
+
+    // Mark every project that will be checked as busy up front so the grid
+    // shows "Checking…" immediately.
+    {
+        let mut st = app.lock().unwrap();
+        for &i in need_network.iter().chain(from_cache.iter()) {
+            st.projects[i].busy = true;
+            st.projects[i].status = "Checking…".to_string();
+        }
+    }
+    for &i in need_network.iter().chain(from_cache.iter()) {
+        push_card(app, catalog, ui_weak, cards, i);
+    }
+
+    // Fresh-cache projects cost no network: run them all now, in parallel.
+    for &i in &from_cache {
+        spawn_check(i, catalog[i].clone(), app, ui_weak, /*allow_network=*/ false);
+    }
+
+    // Order the network checks oldest-checked-first (never-checked = oldest),
+    // so a limited per-cycle budget still lets every project get a turn.
+    {
+        let st = app.lock().unwrap();
+        need_network.sort_by_key(|&i| {
+            st.install_state
+                .last_checked_at(catalog[i].repo)
+                .unwrap_or(0) // never checked -> 0 -> sorts first (oldest)
+        });
+    }
+
+    if need_network.is_empty() {
+        return;
+    }
+
+    // Run the network checks in batches on a coordinator thread so the UI
+    // stays responsive. The coordinator joins each batch before starting the
+    // next, and stops the moment a request is rate-limited.
+    let app = app.clone();
+    let ui_weak = ui_weak.clone();
+    // `Rc` isn't Send, so hand the coordinator an `Arc` snapshot of the
+    // catalog (cheap: Project holds only &'static str fields).
+    let catalog: Arc<Vec<model::Project>> = Arc::new((**catalog).clone());
+    let order = need_network;
+    thread::spawn(move || {
+        let mut stopped_by_rate_limit = false;
+        'batches: for batch in order.chunks(BATCH_SIZE) {
+            let mut handles = Vec::with_capacity(batch.len());
+            for &i in batch {
+                handles.push(spawn_check(
+                    i,
+                    catalog[i].clone(),
+                    &app,
+                    &ui_weak,
+                    /*allow_network=*/ true,
+                ));
+            }
+            // Wait for the whole batch, collecting whether any hit a rate limit.
+            let mut rate_limited = false;
+            for h in handles {
+                if let Ok(CheckOutcome::RateLimited) = h.join() {
+                    rate_limited = true;
+                }
+            }
+            if rate_limited {
+                stopped_by_rate_limit = true;
+                break 'batches;
+            }
+        }
+
+        if stopped_by_rate_limit {
+            // Mark any still-busy projects as deferred so the user sees why
+            // they weren't checked. They remain oldest, so they go first next
+            // startup / Refresh.
+            let pending: Vec<usize> = {
+                let mut st = app.lock().unwrap();
+                let mut pending = Vec::new();
+                for i in 0..st.projects.len() {
+                    if st.projects[i].busy {
+                        st.projects[i].busy = false;
+                        if st.projects[i].installed_version.is_none() {
+                            st.projects[i].status =
+                                "Rate limited — will check later".to_string();
+                        }
+                        pending.push(i);
+                    }
+                }
+                pending
+            };
+            let app2 = app.clone();
+            let ui_weak2 = ui_weak.clone();
+            let catalog2 = catalog.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                repaint_cards(&app2, &catalog2, &ui_weak2, &pending);
+            });
+        }
+    });
+}
+
+/// Check for an update to the installer itself on a worker thread, then set the
+/// UI's `self-update-available` / `self-update-version` properties. Uses the
+/// hourly cache (keyed by the installer's own repo) unless `force` is set, so
+/// it shares the same per-hour request budget as the project checks.
+fn spawn_self_update_check(
+    app: &Arc<Mutex<AppState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    force: bool,
+) {
+    let (pkg, arch) = {
+        let st = app.lock().unwrap();
+        (st.pkg, st.arch)
+    };
+    let app = app.clone();
+    let ui_weak = ui_weak.clone();
+    thread::spawn(move || {
+        // The check reads/writes the shared install-state cache under the lock.
+        let update = {
+            let mut st = app.lock().unwrap();
+            let update = selfupdate::check(&mut st.install_state, pkg, arch, force);
+            st.self_update = update.clone();
+            update
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                match update {
+                    Some(u) => {
+                        ui.set_self_update_available(true);
+                        ui.set_self_update_version(SharedString::from(u.version));
+                    }
+                    None => {
+                        ui.set_self_update_available(false);
+                        ui.set_self_update_version(SharedString::from(""));
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Run one project's check (native detection + release lookup) on a worker
+/// thread and repaint its card. When `allow_network` is false the release
+/// lookup is served from the fresh cache only (no HTTP). Returns a handle whose
+/// join value reports whether the check was rate-limited.
+fn spawn_check(
+    i: usize,
+    project: model::Project,
+    app: &Arc<Mutex<AppState>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    allow_network: bool,
+) -> thread::JoinHandle<CheckOutcome> {
     let (pkg, arch, scope) = {
         let st = app.lock().unwrap();
         (st.pkg, st.arch, st.scope)
     };
+    let slug = project.slug();
+    let catalog_names = (project.name.to_string(), project.description.to_string());
+    let app = app.clone();
+    let ui_weak = ui_weak.clone();
 
-    for (i, project) in catalog.iter().enumerate() {
-        // Mark busy immediately.
+    thread::spawn(move || {
+        // 1. Native detection: does the OS already have this installed? Runs
+        //    quick local subprocesses (dpkg/rpm/defaults/reg) and reflects
+        //    reality even for software installed outside this app. Pass the
+        //    exact path we recorded at install time (if any) so detection is
+        //    robust to real bundle names that differ from the catalog name.
+        let recorded_path = {
+            let st = app.lock().unwrap();
+            install::installed_path(&st.install_state, project.repo).map(|s| s.to_string())
+        };
+        let native_version =
+            detect::detect_installed_version(&project, pkg, scope, recorded_path.as_deref());
+
+        // 2. Release info. `allow_network == false` means serve from fresh
+        //    cache only (these were partitioned as fresh). Otherwise consult
+        //    the cache and, on a miss/stale, hit GitHub and persist.
+        //    `triple` = (tag_name, assets as (name,url) pairs, no_release).
+        let repo_key = project.repo.to_string();
+        let cached: Option<ReleaseTriple> = {
+            let st = app.lock().unwrap();
+            st.install_state.fresh_cache(&repo_key).map(|c| {
+                (
+                    c.tag_name.clone(),
+                    c.assets
+                        .iter()
+                        .map(|a| (a.name.clone(), a.url.clone()))
+                        .collect::<Vec<_>>(),
+                    c.no_release,
+                )
+            })
+        };
+
+        let mut outcome = CheckOutcome::Done;
+        let triple: Option<ReleaseTriple> = match cached {
+            Some(c) => Some(c), // cache hit — no network call
+            None if !allow_network => None, // fresh-cache pass but cache vanished
+            None => {
+                // Cache miss or stale: hit the network, then persist.
+                match github::latest_release(&slug) {
+                    Ok(rel) => {
+                        let assets: Vec<(String, String)> = rel
+                            .assets
+                            .iter()
+                            .map(|a| (a.name.clone(), a.download_url.clone()))
+                            .collect();
+                        let cached_assets: Vec<install::CachedAsset> = assets
+                            .iter()
+                            .map(|(n, u)| install::CachedAsset {
+                                name: n.clone(),
+                                url: u.clone(),
+                            })
+                            .collect();
+                        let mut st = app.lock().unwrap();
+                        st.install_state.put_cache(
+                            &repo_key,
+                            Some(rel.tag_name.clone()),
+                            cached_assets,
+                            false,
+                        );
+                        let _ = install::save_state(&st.install_state);
+                        Some((Some(rel.tag_name.clone()), assets, false))
+                    }
+                    Err(github::FetchError::NoRelease) => {
+                        let mut st = app.lock().unwrap();
+                        st.install_state.put_cache(&repo_key, None, Vec::new(), true);
+                        let _ = install::save_state(&st.install_state);
+                        Some((None, Vec::new(), true))
+                    }
+                    Err(github::FetchError::RateLimited) => {
+                        // Don't cache; tell the coordinator to stop this cycle.
+                        outcome = CheckOutcome::RateLimited;
+                        None
+                    }
+                    Err(github::FetchError::Http(_)) => None, // leave unknown; don't cache
+                }
+            }
+        };
+
+        // 3. Apply to project state.
         {
             let mut st = app.lock().unwrap();
-            st.projects[i].busy = true;
-            st.projects[i].status = "Checking…".to_string();
-        }
-        push_card(app, catalog, ui_weak, cards, i);
+            let ps = &mut st.projects[i];
+            ps.busy = false;
 
-        let slug = project.slug();
-        let app = app.clone();
-        let ui_weak = ui_weak.clone();
-        let catalog_names: (String, String) =
-            (project.name.to_string(), project.description.to_string());
-        // Clone the project so the worker can run OS-native install detection.
-        let project_for_detect = project.clone();
+            // Merge native detection with the local installed.json record.
+            //
+            // On macOS the install location depends on the selected scope
+            // (/Applications vs ~/Applications), and native detection is
+            // scope-aware, so it is authoritative: if the OS does not find the
+            // app in the selected scope, treat it as not installed even if
+            // installed.json has a record (it may have been installed in the
+            // other scope). On Linux/Windows scope doesn't change detection, so
+            // a positive native result wins but a negative one leaves the local
+            // record intact.
+            if pkg == PackageType::Macos {
+                ps.installed_version = native_version.clone();
+            } else if let Some(nv) = native_version.clone() {
+                ps.installed_version = Some(nv);
+            }
 
-        thread::spawn(move || {
-            // 1. Native detection first: does the OS already have this installed?
-            //    This runs quick local subprocesses (dpkg/rpm/defaults/reg) and
-            //    reflects reality even for software installed outside this app.
-            // 1. Native detection first: does the OS already have this installed?
-            //    This runs quick local subprocesses (dpkg/rpm/defaults/reg) and
-            //    reflects reality even for software installed outside this app.
-            //    We also pass the exact path we recorded at install time (if
-            //    any), so detection is robust to real bundle names that differ
-            //    from the catalog's expected name.
-            let recorded_path = {
-                let st = app.lock().unwrap();
-                install::installed_path(&st.install_state, project_for_detect.repo)
-                    .map(|s| s.to_string())
-            };
-            let native_version = detect::detect_installed_version(
-                &project_for_detect,
-                pkg,
-                scope,
-                recorded_path.as_deref(),
-            );
-
-            // 2. Release info: use the hourly cache if fresh, else fetch from
-            //    GitHub and write the result back into installed.json.
-            //    `triple` = (tag_name, assets as (name,url) pairs, no_release).
-            let repo_key = project_for_detect.repo.to_string();
-            let cached = if force {
-                None // explicit Refresh bypasses the hourly cache
-            } else {
-                let st = app.lock().unwrap();
-                st.install_state.fresh_cache(&repo_key).map(|c| {
-                    (
-                        c.tag_name.clone(),
-                        c.assets
-                            .iter()
-                            .map(|a| (a.name.clone(), a.url.clone()))
-                            .collect::<Vec<_>>(),
-                        c.no_release,
-                    )
-                })
-            };
-
-            let triple: Option<ReleaseTriple> = match cached {
-                Some(c) => Some(c), // cache hit — no network call
+            match triple {
+                Some((Some(tag), assets, false)) => {
+                    ps.no_release = false;
+                    ps.latest_version = Some(tag.clone());
+                    match github::best_named_asset(&assets, pkg, arch) {
+                        Some((name, url)) => {
+                            ps.asset = Some((name.clone(), url.clone()));
+                            ps.status = match &ps.installed_version {
+                                Some(v) if v.is_empty() => format!("Installed · latest {tag}"),
+                                Some(v) if github::is_newer(v, &tag) => {
+                                    format!("Installed {v} · latest {tag}")
+                                }
+                                Some(v) => format!("Installed {v} (up to date)"),
+                                None => format!("Latest {tag}"),
+                            };
+                        }
+                        None => {
+                            ps.asset = None;
+                            ps.status = format!("No {} build for {}", pkg.label(), arch.label());
+                        }
+                    }
+                }
+                Some((_, _, true)) | Some((None, _, _)) => {
+                    // No published release.
+                    ps.no_release = true;
+                    ps.latest_version = None;
+                    ps.asset = None;
+                    ps.status = "No published release".to_string();
+                }
                 None => {
-                    // Cache miss or stale: hit the network, then persist.
-                    match github::latest_release(&slug) {
-                        Ok(rel) => {
-                            let assets: Vec<(String, String)> = rel
-                                .assets
-                                .iter()
-                                .map(|a| (a.name.clone(), a.download_url.clone()))
-                                .collect();
-                            let cached_assets: Vec<install::CachedAsset> = assets
-                                .iter()
-                                .map(|(n, u)| install::CachedAsset {
-                                    name: n.clone(),
-                                    url: u.clone(),
-                                })
-                                .collect();
-                            let mut st = app.lock().unwrap();
-                            st.install_state.put_cache(
-                                &repo_key,
-                                Some(rel.tag_name.clone()),
-                                cached_assets,
-                                false,
-                            );
-                            let _ = install::save_state(&st.install_state);
-                            Some((Some(rel.tag_name.clone()), assets, false))
-                        }
-                        Err(github::FetchError::NoRelease) => {
-                            let mut st = app.lock().unwrap();
-                            st.install_state.put_cache(&repo_key, None, Vec::new(), true);
-                            let _ = install::save_state(&st.install_state);
-                            Some((None, Vec::new(), true))
-                        }
-                        Err(github::FetchError::Http(_)) => None, // leave unknown; don't cache
-                    }
-                }
-            };
-
-            // 3. Apply to project state.
-            {
-                let mut st = app.lock().unwrap();
-                let ps = &mut st.projects[i];
-                ps.busy = false;
-
-                // Merge native detection with the local installed.json record.
-                //
-                // On macOS the install location depends on the selected scope
-                // (/Applications vs ~/Applications), and native detection is
-                // scope-aware, so it is authoritative: if the OS does not find
-                // the app in the selected scope, treat it as not installed even
-                // if installed.json has a record (it may have been installed in
-                // the other scope). On Linux/Windows scope doesn't change
-                // detection, so a positive native result wins but a negative one
-                // leaves the local record intact.
-                if pkg == PackageType::Macos {
-                    ps.installed_version = native_version.clone();
-                } else if let Some(nv) = native_version.clone() {
-                    ps.installed_version = Some(nv);
-                }
-
-                match triple {
-                    Some((Some(tag), assets, false)) => {
-                        ps.no_release = false;
-                        ps.latest_version = Some(tag.clone());
-                        match github::best_named_asset(&assets, pkg, arch) {
-                            Some((name, url)) => {
-                                ps.asset = Some((name.clone(), url.clone()));
-                                ps.status = match &ps.installed_version {
-                                    Some(v) if v.is_empty() => {
-                                        format!("Installed · latest {tag}")
-                                    }
-                                    Some(v) if github::is_newer(v, &tag) => {
-                                        format!("Installed {v} · latest {tag}")
-                                    }
-                                    Some(v) => format!("Installed {v} (up to date)"),
-                                    None => format!("Latest {tag}"),
-                                };
+                    // No fresh data (network error, rate limit, or vanished
+                    // cache). Leave release info unknown; installed apps still
+                    // show Remove via apply_card.
+                    ps.asset = None;
+                    if ps.installed_version.is_none() {
+                        ps.status = match outcome {
+                            CheckOutcome::RateLimited => {
+                                "Rate limited — will check later".to_string()
                             }
-                            None => {
-                                ps.asset = None;
-                                ps.status =
-                                    format!("No {} build for {}", pkg.label(), arch.label());
-                            }
-                        }
-                    }
-                    Some((_, _, true)) | Some((None, _, _)) => {
-                        // No published release.
-                        ps.no_release = true;
-                        ps.latest_version = None;
-                        ps.asset = None;
-                        ps.status = "No published release".to_string();
-                    }
-                    None => {
-                        // Network error and no fresh cache: leave release info
-                        // unknown. Installed apps still show Remove via apply_card.
-                        ps.asset = None;
-                        if ps.installed_version.is_none() {
-                            ps.status = "Version check unavailable".to_string();
-                        }
+                            CheckOutcome::Done => "Version check unavailable".to_string(),
+                        };
                     }
                 }
             }
+        }
 
-            // Repaint this card on the UI thread.
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_weak.upgrade() {
-                    let model = ui.get_projects();
-                    if let Some(cards) = model
-                        .as_any()
-                        .downcast_ref::<VecModel<ProjectCard>>()
-                    {
-                        // Reconstruct the pstate snapshot for apply_card.
-                        if let Ok(st) = app.lock() {
-                            let ps = &st.projects[i];
-                            let icon = cards
-                                .row_data(i)
-                                .map(|c| c.icon)
-                                .unwrap_or_else(placeholder_icon);
-                            apply_card(
-                                cards,
-                                i,
-                                ps,
-                                &catalog_names.0,
-                                &catalog_names.1,
-                                &icon,
-                            );
-                        }
+        // Repaint this card on the UI thread.
+        let ui_weak2 = ui_weak.clone();
+        let app2 = app.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak2.upgrade() {
+                let model = ui.get_projects();
+                if let Some(cards) = model.as_any().downcast_ref::<VecModel<ProjectCard>>() {
+                    if let Ok(st) = app2.lock() {
+                        let ps = &st.projects[i];
+                        let icon = cards
+                            .row_data(i)
+                            .map(|c| c.icon)
+                            .unwrap_or_else(placeholder_icon);
+                        apply_card(cards, i, ps, &catalog_names.0, &catalog_names.1, &icon);
                     }
                 }
-            });
+            }
         });
+
+        outcome
+    })
+}
+
+/// Repaint a set of cards on the UI thread from current state.
+fn repaint_cards(
+    app: &Arc<Mutex<AppState>>,
+    catalog: &[model::Project],
+    ui_weak: &slint::Weak<MainWindow>,
+    ids: &[usize],
+) {
+    if let Some(ui) = ui_weak.upgrade() {
+        let model = ui.get_projects();
+        if let Some(cards) = model.as_any().downcast_ref::<VecModel<ProjectCard>>() {
+            if let Ok(st) = app.lock() {
+                for &id in ids {
+                    let ps = &st.projects[id];
+                    let p = &catalog[id];
+                    let icon = cards
+                        .row_data(id)
+                        .map(|c| c.icon)
+                        .unwrap_or_else(placeholder_icon);
+                    apply_card(cards, id, ps, p.name, p.description, &icon);
+                }
+            }
+        }
     }
 }
 

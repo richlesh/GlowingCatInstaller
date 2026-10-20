@@ -223,6 +223,10 @@ export component MainWindow inherits Window {
     // hint describing where it would be / is installed.
     in property <bool> self-installed: false;
     in property <string> self-install-hint;
+    // Self-update: whether a newer release of this installer is available, and
+    // the version string to show on the "Update available" control.
+    in property <bool> self-update-available: false;
+    in property <string> self-update-version;
 
     // About dialog state.
     in property <string> app-version;
@@ -245,6 +249,8 @@ export component MainWindow inherits Window {
     // Install or uninstall this application itself.
     callback self-install-pressed();
     callback self-uninstall-pressed();
+    // Download and run the newer installer for this app.
+    callback self-update-pressed();
     // About dialog: open it (from the menu), confirm/close it, and open a URL
     // in the system browser.
     callback open-about();
@@ -372,6 +378,33 @@ export component MainWindow inherits Window {
                     spacing: 8px;
                     alignment: end;
 
+                    // Self-update pill: shown only when a newer release of this
+                    // app is available. Clicking it downloads and runs the new
+                    // installer.
+                    if root.self-update-available: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 30px;
+                            width: update-txt.preferred-width + 24px;
+                            border-radius: 15px;
+                            border-width: 1px;
+                            border-color: Theme.upgrade;
+                            background: update-ta.has-hover ? Theme.upgrade : Theme.panel;
+                            animate background { duration: 120ms; }
+                            update-txt := Text {
+                                text: "Update available → " + root.self-update-version;
+                                color: update-ta.has-hover ? white : Theme.upgrade;
+                                font-size: 12px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            update-ta := TouchArea {
+                                clicked => { root.self-update-pressed(); }
+                            }
+                        }
+                    }
+
                     // Self-install / uninstall pill. Label reflects state.
                     VerticalLayout {
                         alignment: center;
@@ -415,7 +448,12 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         IconToggle {
-                            glyph: root.dark-mode ? "\u{2600}" : "\u{263d}";
+                            // Show the current theme: a moon in dark mode, a sun
+                            // in light mode. Use ☾ (U+263E LAST QUARTER MOON) from
+                            // the same Miscellaneous Symbols block as the sun — the
+                            // thin ☽ (U+263D) lacks coverage in the bundled font and
+                            // rendered as a tofu box.
+                            glyph: root.dark-mode ? "\u{263E}" : "\u{2600}";
                             clicked => {
                                 root.dark-mode = !root.dark-mode;
                                 root.theme-toggled(root.dark-mode);

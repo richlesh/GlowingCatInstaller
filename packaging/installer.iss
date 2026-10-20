@@ -56,7 +56,7 @@ UninstallDisplayName=Glowing Cat Software Installer
 ; anchored at the repo root (matching the `out\` the CI signs/uploads from)
 ; rather than resolved relative to this script's directory.
 OutputDir={#ResolvedOutputDir}
-OutputBaseFilename=GlowingCatInstaller-{#ArchLabel}-Setup
+OutputBaseFilename=GlowingCatInstaller-{#AppVersion}-{#ArchLabel}-Setup
 SetupIconFile={#ResolvedIconsDir}\app_icon.ico
 UninstallDisplayIcon={app}\glowing-cat-installer.exe
 Compression=lzma2
