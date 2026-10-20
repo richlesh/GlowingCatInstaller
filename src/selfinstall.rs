@@ -67,7 +67,7 @@ fn installed_marker_path() -> Option<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        Some(linux_bin_path()?)
+        linux_bin_path()
     }
     #[cfg(target_os = "windows")]
     {
