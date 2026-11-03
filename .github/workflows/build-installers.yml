@@ -1,10 +1,21 @@
 name: Build Installers
 
 # Builds the Glowing Cat Software Installer itself for every platform/architecture and
-# uploads the installer artifacts. Manual-only: run it from the Actions tab
-# (workflow_dispatch). Optionally publish a GitHub Release from the same run by
-# setting `publish_release: true` and providing a `tag`.
+# uploads the installer artifacts.
+#
+# Auto-release: pushing a change to Cargo.toml on `main` builds every platform
+# and, when the Cargo.toml version has no matching release yet, auto-creates the
+# tag (the bare version, e.g. 1.0.1 — no leading "v") and a GitHub Release with
+# the artifacts attached. Bumping the version is all it takes to cut a release;
+# pushing when the version already has a release just rebuilds (no new release).
+#
+# Manual: dispatch from the Actions tab. Set `publish_release: true` (and
+# optionally a `tag`) to force a release even without a version change.
 on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
   workflow_dispatch:
     inputs:
       publish_release:
@@ -12,7 +23,7 @@ on:
         type: boolean
         default: false
       tag:
-        description: "Release tag / version (e.g. v0.1.0). Stamped into Cargo.toml and all artifact filenames (build-only). Required when publish_release is true."
+        description: "Release tag / version (e.g. v0.1.0). Stamped into Cargo.toml and all artifact filenames (build-only). Leave empty to use the Cargo.toml version."
         type: string
         default: ""
 
@@ -362,13 +373,13 @@ jobs:
           path: ${{ github.workspace }}/out/*.exe
 
   # ---------------------------------------------------------------------------
-  # Optionally attach everything to a GitHub Release. Runs only when the manual
-  # dispatch requested it (publish_release: true) and a tag was supplied.
+  # Attach everything to a GitHub Release. Publishes automatically when the
+  # Cargo.toml version has no release yet (a new version), or on a manual
+  # dispatch with publish_release: true. The tag is the bare version (no "v").
   # ---------------------------------------------------------------------------
   release:
     name: Publish Release
     needs: [linux, macos, windows]
-    if: ${{ inputs.publish_release && inputs.tag != '' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -376,11 +387,43 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Resolve the release tag and decide whether to publish:
+      #   - tag  = the `tag` input (minus a leading "v") if given, else the
+      #            Cargo.toml version (bare, no "v").
+      #   - publish = true when manually requested (publish_release), or when no
+      #               release for this tag exists yet (auto-release on bump).
+      - name: Resolve tag and decide whether to publish
+        id: decide
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.publish_release }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG#v}"
+          if [ -z "$TAG" ]; then
+            TAG="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "Manual publish requested."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — not publishing again."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release for $TAG yet — publishing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Create the release tag at the checked-out commit if it doesn't already
       # exist (locally or on origin), then push it. Existing tags are left as-is.
       - name: Create and push tag if missing
+        if: steps.decide.outputs.publish == 'true'
         env:
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.decide.outputs.tag }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -397,11 +440,13 @@ jobs:
           fi
 
       - name: Download all artifacts
+        if: steps.decide.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       - name: Flatten artifact tree
+        if: steps.decide.outputs.publish == 'true'
         run: |
           mkdir -p release
           find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.exe' \) \
@@ -409,8 +454,9 @@ jobs:
           ls -la release
 
       - name: Create / update GitHub Release
+        if: steps.decide.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
+          tag_name: ${{ steps.decide.outputs.tag }}
           files: release/*
           generate_release_notes: true
