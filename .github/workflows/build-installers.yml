@@ -3,27 +3,17 @@ name: Build Installers
 # Builds the Glowing Cat Software Installer itself for every platform/architecture and
 # uploads the installer artifacts.
 #
-# Auto-release: pushing a change to Cargo.toml on `main` builds every platform
-# and, when the Cargo.toml version has no matching release yet, auto-creates the
-# tag (the bare version, e.g. 1.0.1 — no leading "v") and a GitHub Release with
-# the artifacts attached. Bumping the version is all it takes to cut a release;
-# pushing when the version already has a release just rebuilds (no new release).
-#
-# Manual: dispatch from the Actions tab. Set `publish_release: true` (and
-# optionally a `tag`) to force a release even without a version change.
+# Manual only: dispatch from the Actions tab. Specify a version; the workflow
+# builds every platform and then, if that version has no release yet,
+# automatically creates the tag (the bare version, e.g. 1.0.1 — no leading "v")
+# and a GitHub Release with all artifacts attached. If the version already has a
+# release, it just rebuilds and re-uploads the assets (no duplicate release).
+# Leave the version empty to use whatever is currently in Cargo.toml.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "Cargo.toml"
   workflow_dispatch:
     inputs:
-      publish_release:
-        description: "Also publish a GitHub Release with the built artifacts"
-        type: boolean
-        default: false
-      tag:
-        description: "Release tag / version (e.g. v0.1.0). Stamped into Cargo.toml and all artifact filenames (build-only). Leave empty to use the Cargo.toml version."
+      version:
+        description: "Version to build and release (e.g. 1.0.1). Empty = use the Cargo.toml version. A tag/release is created automatically if it doesn't already exist."
         type: string
         default: ""
 
@@ -59,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag }}"
+          TAG="${{ inputs.version }}"
           VERSION="${TAG#v}"
           if [ -z "$VERSION" ]; then
             VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -158,7 +148,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag }}"
+          TAG="${{ inputs.version }}"
           VERSION="${TAG#v}"
           if [ -z "$VERSION" ]; then
             VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -289,7 +279,7 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          $tag = "${{ inputs.tag }}"
+          $tag = "${{ inputs.version }}"
           $version = $tag -replace '^v',''
           if ([string]::IsNullOrWhiteSpace($version)) {
             $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
@@ -373,9 +363,10 @@ jobs:
           path: ${{ github.workspace }}/out/*.exe
 
   # ---------------------------------------------------------------------------
-  # Attach everything to a GitHub Release. Publishes automatically when the
-  # Cargo.toml version has no release yet (a new version), or on a manual
-  # dispatch with publish_release: true. The tag is the bare version (no "v").
+  # Attach everything to a GitHub Release. The manual build always publishes:
+  # the tag (bare version, no "v") and release are created if missing, or the
+  # existing release's assets are refreshed. The version comes from the
+  # `version` input, falling back to the Cargo.toml version.
   # ---------------------------------------------------------------------------
   release:
     name: Publish Release
@@ -387,41 +378,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Resolve the release tag and decide whether to publish:
-      #   - tag  = the `tag` input (minus a leading "v") if given, else the
-      #            Cargo.toml version (bare, no "v").
-      #   - publish = true when manually requested (publish_release), or when no
-      #               release for this tag exists yet (auto-release on bump).
-      - name: Resolve tag and decide whether to publish
+      # Resolve the release tag: the `version` input (minus a leading "v") if
+      # provided, else the current Cargo.toml version (bare, no "v"). The build
+      # always publishes — the tag/release is created if missing, or its assets
+      # are refreshed if it already exists (both idempotent below).
+      - name: Resolve tag
         id: decide
         env:
-          INPUT_TAG: ${{ inputs.tag }}
-          FORCE: ${{ inputs.publish_release }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          TAG="${INPUT_TAG#v}"
+          TAG="${INPUT_VERSION#v}"
           if [ -z "$TAG" ]; then
             TAG="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved tag: $TAG"
 
-          if [ "$FORCE" = "true" ]; then
-            echo "Manual publish requested."
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          elif gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists — not publishing again."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "No release for $TAG yet — publishing."
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
-
       # Create the release tag at the checked-out commit if it doesn't already
       # exist (locally or on origin), then push it. Existing tags are left as-is.
       - name: Create and push tag if missing
-        if: steps.decide.outputs.publish == 'true'
         env:
           TAG: ${{ steps.decide.outputs.tag }}
         run: |
@@ -440,13 +416,11 @@ jobs:
           fi
 
       - name: Download all artifacts
-        if: steps.decide.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       - name: Flatten artifact tree
-        if: steps.decide.outputs.publish == 'true'
         run: |
           mkdir -p release
           find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.exe' \) \
@@ -454,7 +428,6 @@ jobs:
           ls -la release
 
       - name: Create / update GitHub Release
-        if: steps.decide.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.decide.outputs.tag }}
