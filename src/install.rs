@@ -526,7 +526,8 @@ fn install_linux(
 
 /// Windows: run the installer. `.msi` installs with a basic-UI progress dialog
 /// (`msiexec /i /qb`), per-machine (`ALLUSERS=1`, UAC prompt) or per-user
-/// (`MSIINSTALLPERUSER=1`, no elevation) depending on scope; `.exe` is launched
+/// (`MSIINSTALLPERUSER=1 ALLUSERS=2`, no elevation) depending on scope; `.exe`
+/// is launched
 /// directly (silent/scope flags vary between NSIS/Inno/etc., so we let the
 /// installer's own UI drive). Uninstall is driven from the registry
 /// UninstallString, so no `installed_to` is recorded.
@@ -541,7 +542,17 @@ fn install_windows(path: &Path, scope: InstallScope) -> Result<InstallOutcome, I
         match scope {
             InstallScope::AllUsers => run("msiexec", &["/i", &p, "/qb", "ALLUSERS=1"])?,
             InstallScope::ThisUser => {
-                run("msiexec", &["/i", &p, "/qb", "MSIINSTALLPERUSER=1", "ALLUSERS="])?
+                // Per-user install: MSIINSTALLPERUSER=1 requests the per-user
+                // scope and ALLUSERS=2 ("install per-user if the package
+                // allows it"). ALLUSERS must be 2 here, not an empty value —
+                // a bare `ALLUSERS=` is parsed as a malformed property
+                // expression and msiexec rejects the command line with
+                // error 1639 (ERROR_INVALID_COMMAND_LINE). The MSI itself must
+                // also be authored to permit a per-user scope (see the
+                // jpackage WiX overrides in the packaging workflow); otherwise
+                // msiexec silently falls back to the per-machine default and
+                // the app won't appear under the user's Apps & features.
+                run("msiexec", &["/i", &p, "/qb", "MSIINSTALLPERUSER=1", "ALLUSERS=2"])?
             }
         }
         Ok(InstallOutcome { installed_to: String::new(), automated: true })

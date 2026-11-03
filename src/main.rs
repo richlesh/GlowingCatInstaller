@@ -4,6 +4,12 @@
 //! lookups and downloads) runs on background `std::thread`s and posts results
 //! back with `slint::invoke_from_event_loop` via a `Weak<MainWindow>`.
 
+// On Windows, build as a GUI (windows) subsystem binary in release so launching
+// the app does not spawn a black console window alongside it. Debug builds keep
+// the console subsystem so `println!`, panics, and tracing remain visible when
+// run from a terminal.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod detect;
 mod github;
 mod install;

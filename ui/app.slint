@@ -63,7 +63,11 @@ component DialogScrim inherits Rectangle {
 
 component IconToggle inherits Rectangle {
     callback clicked();
-    in property <string> glyph;
+    // Which icon to draw: "refresh", "sun", or "moon". Drawn as vector Paths
+    // (not font glyphs) so they render identically on every platform — the
+    // Windows UI font lacks the ↻/☾ symbols, which previously showed as blank
+    // or tofu boxes.
+    in property <string> icon-kind;
     width: 36px;
     height: 36px;
     border-radius: 18px;
@@ -71,13 +75,74 @@ component IconToggle inherits Rectangle {
     border-width: 1px;
     border-color: Theme.panel-border;
     animate background { duration: 120ms; }
-    Text {
-        text: root.glyph;
-        font-size: 18px;
-        color: Theme.text;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+
+    // Icon canvas: a 24x24 viewbox centered in the button. Each icon is drawn
+    // with Path elements whose coordinates are in that viewbox.
+    Rectangle {
+        width: 20px;
+        height: 20px;
+
+        // --- Refresh: a near-full circular arrow with an arrowhead. ---
+        if root.icon-kind == "refresh": Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke: Theme.text;
+            stroke-width: 2px;
+            fill: transparent;
+            // Arc from ~1 o'clock around counter-clockwise to ~11 o'clock.
+            commands: "M 19 7 A 8 8 0 1 0 20 12";
+        }
+        if root.icon-kind == "refresh": Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            fill: Theme.text;
+            // Arrowhead at the open end of the arc (top-right).
+            commands: "M 19 3 L 19 9 L 13 7 Z";
+        }
+
+        // --- Sun: a filled disc with eight short rays. ---
+        if root.icon-kind == "sun": Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            fill: Theme.text;
+            // Center disc (two half-arcs make a full circle).
+            commands: "M 12 7 A 5 5 0 0 1 12 17 A 5 5 0 0 1 12 7 Z";
+        }
+        if root.icon-kind == "sun": Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke: Theme.text;
+            stroke-width: 2px;
+            // Eight rays (N, S, E, W and the four diagonals).
+            commands:
+                "M 12 1 L 12 4 M 12 20 L 12 23 M 1 12 L 4 12 M 20 12 L 23 12"
+              + "M 4 4 L 6 6 M 18 18 L 20 20 M 20 4 L 18 6 M 6 18 L 4 20";
+        }
+
+        // --- Moon: a crescent formed by subtracting an offset disc. ---
+        if root.icon-kind == "moon": Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            fill: Theme.text;
+            // A disc with a bite taken out of its upper-right by a second,
+            // reverse-wound arc (even-odd fill) to leave a crescent.
+            fill-rule: evenodd;
+            commands:
+                "M 12 2 A 10 10 0 1 0 12 22 A 10 10 0 1 0 12 2 Z"
+              + "M 15 3 A 9 9 0 1 1 15 21 A 11 11 0 1 0 15 3 Z";
+        }
     }
+
     ta := TouchArea {
         clicked => { root.clicked(); }
     }
@@ -446,7 +511,7 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         IconToggle {
-                            glyph: "\u{21bb}";
+                            icon-kind: "refresh";
                             clicked => { root.refresh(); }
                         }
                     }
@@ -454,11 +519,10 @@ export component MainWindow inherits Window {
                         alignment: center;
                         IconToggle {
                             // Show the current theme: a moon in dark mode, a sun
-                            // in light mode. Use ☾ (U+263E LAST QUARTER MOON) from
-                            // the same Miscellaneous Symbols block as the sun — the
-                            // thin ☽ (U+263D) lacks coverage in the bundled font and
-                            // rendered as a tofu box.
-                            glyph: root.dark-mode ? "\u{263E}" : "\u{2600}";
+                            // in light mode. Drawn as vector Paths, so there is no
+                            // dependency on the platform font having these symbols
+                            // (the Windows UI font lacks the moon glyph).
+                            icon-kind: root.dark-mode ? "moon" : "sun";
                             clicked => {
                                 root.dark-mode = !root.dark-mode;
                                 root.theme-toggled(root.dark-mode);

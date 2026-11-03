@@ -8,7 +8,7 @@
 //!   NeuroPanther-Chat-1.11.2-arm64.exe     (windows, arm64)
 //!   CPUSim64-2.8.0-x64.msi                 (windows, x64, msi not exe)
 //!   ArchiveSphynx-2.2.0-arm64.dmg          (macos, arm64)
-//!   Joshua-1.8.0-x64-setup.exe             (windows, x64)
+//!   Joshua-1.8.0-x64-Setup.exe             (windows, x64)
 //!
 //! Rather than hardcode one scheme we tokenize the filename and score each
 //! candidate against the requested (PackageType, Arch). The highest scoring
