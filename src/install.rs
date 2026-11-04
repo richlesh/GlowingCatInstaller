@@ -562,7 +562,18 @@ fn install_windows(path: &Path, scope: InstallScope) -> Result<InstallOutcome, I
         // fragile indirection; launching the installer executable directly via
         // platform::command (which sets CREATE_NO_WINDOW) shows only the
         // installer's own GUI. Fire-and-forget: the installer drives the rest.
+        //
+        // Pass the scope through so the user's "Install for:" choice is honored
+        // rather than defaulting. electron-builder's NSIS installers (the .exe
+        // packages in this catalog) understand `/currentuser` and `/allusers`
+        // (NSIS MultiUser). Other installers ignore unknown flags, so this is
+        // safe as a general hint.
+        let scope_flag = match scope {
+            InstallScope::AllUsers => "/allusers",
+            InstallScope::ThisUser => "/currentuser",
+        };
         crate::platform::command(&p)
+            .arg(scope_flag)
             .spawn()
             .map(|_| ())
             .map_err(|e| InstallError::Launch(format!("{p}: {e}")))?;
