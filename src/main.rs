@@ -1019,51 +1019,98 @@ fn handle_action(
     match action {
         Action::None => {}
         Action::Remove => {
+            // Mark busy on the UI thread, then do the uninstall on a worker
+            // thread. Running remove_project inline on the event-loop thread —
+            // and worse, while holding the AppState lock — spawned the native
+            // uninstaller and blocked the UI, hanging the window. Mirror the
+            // Install path: snapshot what we need, work off-thread without the
+            // lock, then marshal the result back.
+            {
+                let mut st = app.lock().unwrap();
+                st.projects[id].busy = true;
+                st.projects[id].status = "Removing…".to_string();
+            }
+            push_card(app, catalog, ui_weak, cards, id);
+
             let project = catalog[id].clone();
             let app_name = project.macos_app_name();
             let pkg_name = project.deb_rpm_package();
-
-            // Run the automated uninstall (delete the macOS .app, apt/dnf
-            // remove on Linux, registry UninstallString on Windows) and clear
-            // our local tracking.
-            let remove_result = {
-                let mut st = app.lock().unwrap();
-                let pkg = st.pkg;
-                install::remove_project(&mut st.install_state, &repo, pkg, &app_name, &pkg_name)
+            let (pkg_now, scope_now) = {
+                let st = app.lock().unwrap();
+                (st.pkg, st.scope)
             };
 
-            match remove_result {
-                Err(e) => {
+            let app = app.clone();
+            let ui_weak = ui_weak.clone();
+            let repo2 = repo.clone();
+            thread::spawn(move || {
+                // Operate on a cloned install state so the global lock isn't
+                // held across the uninstaller subprocess.
+                let mut state_clone = {
+                    let st = app.lock().unwrap();
+                    st.install_state.clone()
+                };
+                let remove_result = install::remove_project(
+                    &mut state_clone,
+                    &repo2,
+                    pkg_now,
+                    &app_name,
+                    &pkg_name,
+                );
+                // Re-detect (also off the lock) to confirm it's actually gone.
+                let still_present = match &remove_result {
+                    Ok(_) => detect::detect_installed_version(&project, pkg_now, scope_now, None),
+                    Err(_) => None,
+                };
+
+                {
                     let mut st = app.lock().unwrap();
-                    st.projects[id].status = format!("Remove failed: {e}");
-                }
-                Ok(_performed) => {
-                    // Re-detect to confirm the software is actually gone. The
-                    // local record was just cleared by remove_project, so pass
-                    // None and rely on the scope's Applications folder.
-                    let still_present = {
-                        let st = app.lock().unwrap();
-                        detect::detect_installed_version(&project, st.pkg, st.scope, None)
-                    };
-                    let mut st = app.lock().unwrap();
-                    match still_present {
-                        Some(_) => {
-                            // Could not fully remove it (e.g. a copy in a
-                            // root-owned /Applications, or no pkexec): keep it
-                            // marked installed and point at where to remove it.
-                            let hint = detect::install_location_hint(&project, st.pkg, st.scope);
-                            st.projects[id].status = format!(
-                                "Installed outside this app — remove via the OS ({hint})"
-                            );
+                    st.install_state = state_clone;
+                    st.projects[id].busy = false;
+                    match remove_result {
+                        Err(e) => {
+                            st.projects[id].status = format!("Remove failed: {e}");
                         }
-                        None => {
-                            st.projects[id].installed_version = None;
-                            st.projects[id].status = "Removed".to_string();
-                        }
+                        Ok(_performed) => match still_present {
+                            Some(_) => {
+                                let hint =
+                                    detect::install_location_hint(&project, pkg_now, scope_now);
+                                st.projects[id].status = format!(
+                                    "Installed outside this app — remove via the OS ({hint})"
+                                );
+                            }
+                            None => {
+                                st.projects[id].installed_version = None;
+                                st.projects[id].status = "Removed".to_string();
+                            }
+                        },
                     }
                 }
-            }
-            push_card(app, catalog, ui_weak, cards, id);
+
+                // Update the card on the UI thread. Mirror the Install path:
+                // capture no Rc (catalog/cards) in the worker; recover the
+                // name/desc/icon from the existing card row.
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        let model = ui.get_projects();
+                        if let Some(cards) = model.as_any().downcast_ref::<VecModel<ProjectCard>>() {
+                            if let Ok(st) = app.lock() {
+                                let ps = &st.projects[id];
+                                if let Some(existing) = cards.row_data(id) {
+                                    apply_card(
+                                        cards,
+                                        id,
+                                        ps,
+                                        existing.name.as_ref(),
+                                        existing.description.as_ref(),
+                                        &existing.icon,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            });
         }
         Action::Install { asset, version } => {
             // Mark busy, then do the download+open on a worker thread.
@@ -1086,23 +1133,33 @@ fn handle_action(
             let app_name = catalog[id].macos_app_name();
             let pkg_name = catalog[id].deb_rpm_package();
             thread::spawn(move || {
-                let res = {
-                    let mut st = app.lock().unwrap();
-                    install::install_project(
-                        &mut st.install_state,
-                        &repo2,
-                        &version,
-                        pkg,
-                        arch,
-                        scope,
-                        &asset_name,
-                        &asset_url,
-                        &app_name,
-                        &pkg_name,
-                    )
+                // Do the long-running work (download + run installer) WITHOUT
+                // holding the global AppState lock — otherwise the UI thread
+                // (refresh, other actions) blocks on the mutex for the whole
+                // download, hanging the window. Operate on a cloned install
+                // state, then lock only briefly to merge the result back.
+                let mut state_clone = {
+                    let st = app.lock().unwrap();
+                    st.install_state.clone()
                 };
+                let res = install::install_project(
+                    &mut state_clone,
+                    &repo2,
+                    &version,
+                    pkg,
+                    arch,
+                    scope,
+                    &asset_name,
+                    &asset_url,
+                    &app_name,
+                    &pkg_name,
+                );
                 {
                     let mut st = app.lock().unwrap();
+                    // Adopt the state install_project produced (it already
+                    // persisted it to disk); this keeps the in-memory copy in
+                    // sync without having held the lock across the download.
+                    st.install_state = state_clone;
                     let ps = &mut st.projects[id];
                     ps.busy = false;
                     match res {

@@ -557,8 +557,15 @@ fn install_windows(path: &Path, scope: InstallScope) -> Result<InstallOutcome, I
         }
         Ok(InstallOutcome { installed_to: String::new(), automated: true })
     } else {
-        // .exe (or unknown): launch the installer; it drives the rest.
-        spawn("cmd", &["/C", "start", "", &p])?;
+        // .exe (or unknown): launch the NSIS/Inno installer directly. Going
+        // through `cmd /C start` spawns a console (the "DOS box") and adds a
+        // fragile indirection; launching the installer executable directly via
+        // platform::command (which sets CREATE_NO_WINDOW) shows only the
+        // installer's own GUI. Fire-and-forget: the installer drives the rest.
+        crate::platform::command(&p)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| InstallError::Launch(format!("{p}: {e}")))?;
         Ok(InstallOutcome { installed_to: String::new(), automated: false })
     }
 }
