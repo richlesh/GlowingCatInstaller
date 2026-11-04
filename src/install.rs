@@ -266,7 +266,7 @@ pub struct InstallOutcome {
 
 /// Run a command to completion and require success, capturing stderr on failure.
 fn run(program: &str, args: &[&str]) -> Result<(), InstallError> {
-    let out = std::process::Command::new(program)
+    let out = crate::platform::command(program)
         .args(args)
         .output()
         .map_err(|e| InstallError::Launch(format!("{program}: {e}")))?;
@@ -286,7 +286,7 @@ fn run(program: &str, args: &[&str]) -> Result<(), InstallError> {
 /// Spawn a command without waiting (for the download-then-open fallback, where
 /// the OS/installer owns the rest of the flow).
 fn spawn(program: &str, args: &[&str]) -> Result<(), InstallError> {
-    std::process::Command::new(program)
+    crate::platform::command(program)
         .args(args)
         .spawn()
         .map(|_| ())

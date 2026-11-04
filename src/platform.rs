@@ -7,6 +7,26 @@
 
 use std::fmt;
 
+/// Build a `std::process::Command` that never flashes a console window on
+/// Windows. Every short-lived helper process we run — registry queries during
+/// detection, the install/uninstall commands, URL opening — would otherwise
+/// briefly pop an empty console window, and because detection runs for every
+/// catalog entry on launch and on refresh, the user sees a flurry of "phantom"
+/// windows. The `CREATE_NO_WINDOW` (0x08000000) creation flag suppresses them.
+/// On non-Windows targets this is just `Command::new`.
+pub fn command(program: &str) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+
 /// CPU architecture of the installer we want to fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch {

@@ -208,7 +208,7 @@ fn detect_windows(display_substr: &str) -> Option<String> {
 
     for root in ROOTS {
         // Enumerate subkeys.
-        let list = std::process::Command::new("reg")
+        let list = crate::platform::command("reg")
             .args(["query", root])
             .output()
             .ok()?;
@@ -236,7 +236,7 @@ fn detect_windows(display_substr: &str) -> Option<String> {
 /// Read a single registry string value via `reg query <key> /v <name>`.
 #[cfg(target_os = "windows")]
 fn reg_value(key: &str, name: &str) -> Option<String> {
-    let out = std::process::Command::new("reg")
+    let out = crate::platform::command("reg")
         .args(["query", key, "/v", name])
         .output()
         .ok()?;
@@ -279,7 +279,7 @@ pub fn run_windows_uninstall(display_substr: &str) -> Result<bool, crate::instal
     ];
 
     for root in ROOTS {
-        let list = match std::process::Command::new("reg").args(["query", root]).output() {
+        let list = match crate::platform::command("reg").args(["query", root]).output() {
             Ok(o) if o.status.success() => o,
             _ => continue,
         };
@@ -301,7 +301,9 @@ pub fn run_windows_uninstall(display_substr: &str) -> Result<bool, crate::instal
                 return Ok(false);
             };
             // Run the command line through cmd so quoting/args are honoured.
-            std::process::Command::new("cmd")
+            // CREATE_NO_WINDOW hides the intermediate cmd console; the
+            // uninstaller's own UI (if any) still appears normally.
+            crate::platform::command("cmd")
                 .args(["/C", &cmd])
                 .spawn()
                 .map_err(|e| crate::install::InstallError::Launch(format!("uninstall: {e}")))?;

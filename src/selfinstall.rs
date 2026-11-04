@@ -379,7 +379,7 @@ pub fn install() -> Result<String, SelfInstallError> {
             target = dst_exe.display(),
             wd = dir.display(),
         );
-        let status = std::process::Command::new("powershell")
+        let status = crate::platform::command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .status()
             .map_err(|e| SelfInstallError::Platform(format!("shortcut: {e}")))?;

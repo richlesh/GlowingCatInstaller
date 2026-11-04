@@ -403,7 +403,7 @@ fn open_url(url: &str) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let (program, args): (&str, Vec<&str>) = ("xdg-open", vec![url]);
 
-    let _ = std::process::Command::new(program).args(args).spawn();
+    let _ = platform::command(program).args(args).spawn();
 }
 
 /// Resolve the directory that contains `resources/icons`, independent of the
